@@ -506,7 +506,7 @@ pub struct TurboTasks<B: Backend + 'static> {
 /// - Has a unique task id.
 /// - Is potentially cached.
 /// - The backend is aware of.
-struct CurrentTaskState {
+pub(crate) struct CurrentTaskState {
     task_id: Option<TaskId>,
     execution_id: ExecutionId,
     priority: TaskPriority,
@@ -580,6 +580,40 @@ impl CurrentTaskState {
             );
         }
     }
+}
+
+/// Read a local task output given an explicit `&Arc<RwLock<CurrentTaskState>>` instead of
+/// looking up the `CURRENT_TASK_STATE` task-local on every call.
+///
+/// This is the hot-path equivalent of [`TurboTasks::try_read_local_output`] used by
+/// [`crate::raw_vc::ResolveRawVcFuture`] (which caches the state `Arc` across polls of the
+/// same future to avoid the per-poll `LocalKey::with` cost). Returns the same shape as
+/// `try_read_local_output`: `Ok(Ok(vc))` when the local task has completed, `Ok(Err(listener))`
+/// when it is still scheduled, and `Err(_)` if the stored output is itself an error.
+pub(crate) fn try_read_local_output_in_state(
+    state: &Arc<RwLock<CurrentTaskState>>,
+    execution_id: ExecutionId,
+    local_task_id: LocalTaskId,
+) -> Result<Result<RawVc, EventListener>> {
+    let gts_read = state.read().unwrap();
+
+    // Local Vcs are local to their parent task's current execution, and do not exist
+    // outside of it. This is weakly enforced at compile time using the `NonLocalValue`
+    // marker trait. This assertion exists to handle any potential escapes that the
+    // compile-time checks cannot capture.
+    gts_read.assert_execution_id(execution_id);
+
+    match gts_read.local_tasks.get(local_task_id) {
+        LocalTask::Scheduled { done_event } => Ok(Err(done_event.listen())),
+        LocalTask::Done { output } => Ok(Ok(output.as_read_result()?)),
+    }
+}
+
+/// Returns a clone of the `CURRENT_TASK_STATE` task-local for the calling future. Intended
+/// for callers that want to cache the `Arc` across many polls (see
+/// [`try_read_local_output_in_state`]).
+pub(crate) fn current_task_state() -> Arc<RwLock<CurrentTaskState>> {
+    CURRENT_TASK_STATE.with(Arc::clone)
 }
 
 // TODO implement our own thread pool and make these thread locals instead
@@ -1475,20 +1509,8 @@ impl<B: Backend + 'static> TurboTasksApi for TurboTasks<B> {
         local_task_id: LocalTaskId,
     ) -> Result<Result<RawVc, EventListener>> {
         debug_assert_not_in_top_level_task("read_local_output");
-        CURRENT_TASK_STATE.with(|gts| {
-            let gts_read = gts.read().unwrap();
-
-            // Local Vcs are local to their parent task's current execution, and do not exist
-            // outside of it. This is weakly enforced at compile time using the `NonLocalValue`
-            // marker trait. This assertion exists to handle any potential escapes that the
-            // compile-time checks cannot capture.
-            gts_read.assert_execution_id(execution_id);
-
-            match gts_read.local_tasks.get(local_task_id) {
-                LocalTask::Scheduled { done_event } => Ok(Err(done_event.listen())),
-                LocalTask::Done { output } => Ok(Ok(output.as_read_result()?)),
-            }
-        })
+        CURRENT_TASK_STATE
+            .with(|gts| try_read_local_output_in_state(gts, execution_id, local_task_id))
     }
 
     fn read_task_collectibles(&self, task: TaskId, trait_id: TraitTypeId) -> TaskCollectiblesMap {

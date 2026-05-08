@@ -2,7 +2,7 @@ use std::{
     fmt::{Debug, Display},
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, RwLock},
     task::{Poll, ready},
 };
 
@@ -18,8 +18,9 @@ use crate::{
     event::EventListener,
     id::{ExecutionId, LocalTaskId},
     manager::{
-        ReadCellTracking, ReadTracking, SUPPRESS_EVENTUAL_CONSISTENCY_TOP_LEVEL_TASK_CHECK,
-        TurboTasksApi, read_local_output, with_turbo_tasks,
+        CurrentTaskState, ReadCellTracking, ReadTracking,
+        SUPPRESS_EVENTUAL_CONSISTENCY_TOP_LEVEL_TASK_CHECK, TurboTasksApi, current_task_state,
+        read_local_output, try_read_local_output_in_state, with_turbo_tasks,
     },
     registry::get_value_type,
     turbo_tasks,
@@ -308,6 +309,23 @@ pub struct ResolveRawVcFuture {
     /// during the resolve. This flag indicates that the initial read was strongly consistent.
     strongly_consistent: bool,
     listener: Option<EventListener>,
+    /// Cached `Arc<dyn TurboTasksApi>` for the turbo-tasks scope this future was first polled in.
+    ///
+    /// Polling this future is on a hot path. Each poll used to call `with_turbo_tasks(...)` (a
+    /// `LocalKey::with` access on the `TURBO_TASKS` thread-local), which showed up in profiles
+    /// even though each `LocalKey::with` call is individually cheap. By caching the `Arc` on the
+    /// first poll we pay the thread-local lookup once and reuse the clone for every subsequent
+    /// poll. The future cannot legally migrate between turbo-tasks scopes, so the cached value
+    /// is valid for the lifetime of the future.
+    tt: Option<Arc<dyn TurboTasksApi>>,
+    /// Cached `Arc<RwLock<CurrentTaskState>>` for resolving `RawVc::LocalOutput` without going
+    /// through `CURRENT_TASK_STATE.with(...)` on every poll.
+    ///
+    /// `foo(bar).await` patterns produce `RawVc::LocalOutput` values that this future polls
+    /// repeatedly until ready. Each previous poll did a `LocalKey::with` on `CURRENT_TASK_STATE`
+    /// inside the `try_read_local_output` trait method. The state `Arc` does not change across
+    /// polls of the same future, so we cache it here on first use.
+    cts: Option<Arc<RwLock<CurrentTaskState>>>,
 }
 
 impl ResolveRawVcFuture {
@@ -317,6 +335,8 @@ impl ResolveRawVcFuture {
             read_output_options: ReadOutputOptions::default(),
             strongly_consistent: false,
             listener: None,
+            tt: None,
+            cts: None,
         }
     }
 
@@ -349,7 +369,10 @@ impl Future for ResolveRawVcFuture {
         // SAFETY: we are not moving self
         let this = unsafe { self.get_unchecked_mut() };
 
-        let poll_fn = |tt: &Arc<dyn TurboTasksApi>| -> Poll<Self::Output> {
+        // Cache `TURBO_TASKS` once per future to avoid a `LocalKey::with` on every poll.
+        let tt = this.tt.get_or_insert_with(|| with_turbo_tasks(Arc::clone));
+
+        let poll_fn = || -> Poll<Self::Output> {
             'outer: loop {
                 ready!(poll_listener(&mut this.listener, cx));
                 let listener = match this.current {
@@ -379,7 +402,13 @@ impl Future for ResolveRawVcFuture {
                             this.read_output_options.consistency,
                             ReadConsistency::Eventual
                         );
-                        let read_result = tt.try_read_local_output(execution_id, local_task_id);
+                        // Cache the `CurrentTaskState` `Arc` lazily: not every future ever
+                        // resolves a `LocalOutput`, so we only pay the `LocalKey::with` cost
+                        // when we actually need it. Once cached we skip both the thread-local
+                        // lookup and the `dyn TurboTasksApi` virtual dispatch.
+                        let cts = this.cts.get_or_insert_with(current_task_state);
+                        let read_result =
+                            try_read_local_output_in_state(cts, execution_id, local_task_id);
                         match read_result {
                             Ok(Ok(vc)) => {
                                 this.current = vc;
@@ -400,7 +429,7 @@ impl Future for ResolveRawVcFuture {
         // strongly consistent read isn't a single atomic operation, any inner `TaskOutput` or
         // `TaskCell` could get mutated after the strongly consistent read of the outer
         // `TaskOutput`.
-        suppress_top_level_task_check(this.strongly_consistent, || with_turbo_tasks(poll_fn))
+        suppress_top_level_task_check(this.strongly_consistent, poll_fn)
     }
 }
 
@@ -416,6 +445,9 @@ pub struct ReadRawVcFuture {
     resolved: Option<(TaskId, CellId)>,
     /// Phase 2: listener for the cell read wait.
     listener: Option<EventListener>,
+    /// Cached `Arc<dyn TurboTasksApi>` for phase 2 polls. See the equivalent field on
+    /// [`ResolveRawVcFuture`] for rationale.
+    tt: Option<Arc<dyn TurboTasksApi>>,
 }
 
 impl ReadRawVcFuture {
@@ -425,6 +457,7 @@ impl ReadRawVcFuture {
             read_cell_options: ReadCellOptions::default(),
             resolved: None,
             listener: None,
+            tt: None,
         }
     }
 
@@ -486,7 +519,10 @@ impl Future for ReadRawVcFuture {
         // At this point `this.resolved` is `Some((task, index))`.
         let (task, index) = this.resolved.unwrap();
 
-        let poll_fn = |tt: &Arc<dyn TurboTasksApi>| -> Poll<Self::Output> {
+        // Cache `TURBO_TASKS` once per future to avoid a `LocalKey::with` on every poll.
+        let tt = this.tt.get_or_insert_with(|| with_turbo_tasks(Arc::clone));
+
+        let poll_fn = || -> Poll<Self::Output> {
             loop {
                 ready!(poll_listener(&mut this.listener, cx));
                 let listener = match tt.try_read_task_cell(task, index, this.read_cell_options) {
@@ -502,9 +538,7 @@ impl Future for ReadRawVcFuture {
         // strongly-consistent. The suppression from `ResolveRawVcFuture::poll` only lasts for
         // the duration of that individual `poll` call and does not carry over to subsequent calls
         // or to this phase.
-        suppress_top_level_task_check(this.resolve.strongly_consistent, || {
-            with_turbo_tasks(poll_fn)
-        })
+        suppress_top_level_task_check(this.resolve.strongly_consistent, poll_fn)
     }
 }
 
