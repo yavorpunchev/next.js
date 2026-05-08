@@ -70,8 +70,9 @@ use crate::{
     },
     backing_storage::{BackingStorage, SnapshotItem, compute_task_type_hash},
     data::{
-        ActivenessState, CellRef, CollectibleRef, CollectiblesRef, Dirtyness, InProgressCellState,
-        InProgressState, InProgressStateInner, OutputValue, TransientTask,
+        ActivenessState, CellDependency, CellDependent, CellRef, CollectibleRef, CollectiblesRef,
+        Dirtyness, InProgressCellState, InProgressState, InProgressStateInner, OutputValue,
+        TransientTask,
     },
     error::TaskError,
     utils::{
@@ -768,7 +769,7 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
                 && (!task.immutable() || cfg!(feature = "verify_immutable"))
             {
                 let reader = reader.unwrap();
-                let _ = task.add_cell_dependents((cell, key, reader));
+                let _ = task.add_cell_dependents(CellDependent::new(cell, reader, key));
                 drop(task);
 
                 // Note: We use `task_pair` earlier to lock the task and its reader at the same
@@ -780,8 +781,9 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
                     task: task_id,
                     cell,
                 };
-                if !reader_task.remove_outdated_cell_dependencies(&(target, key)) {
-                    let _ = reader_task.add_cell_dependencies((target, key));
+                let dep = CellDependency::new(target, key);
+                if !reader_task.remove_outdated_cell_dependencies(&dep) {
+                    let _ = reader_task.add_cell_dependencies(dep);
                 }
                 drop(reader_task);
             }
@@ -2165,7 +2167,7 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
             Some(
                 // Collect all dependencies on tasks to check if all dependencies are immutable
                 task.iter_output_dependencies()
-                    .chain(task.iter_cell_dependencies().map(|(target, _key)| target.task))
+                    .chain(task.iter_cell_dependencies().map(|dep| dep.cell_ref().task))
                     .collect::<FxHashSet<_>>(),
             )
         } else {
@@ -2200,7 +2202,7 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
             // breaking dependency tracking.
             old_edges.extend(
                 task.iter_outdated_cell_dependencies()
-                    .map(|(target, key)| OutdatedEdge::CellDependency(target, key)),
+                    .map(OutdatedEdge::CellDependency),
             );
             old_edges.extend(
                 task.iter_outdated_output_dependencies()

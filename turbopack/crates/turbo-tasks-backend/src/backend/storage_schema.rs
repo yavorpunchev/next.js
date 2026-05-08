@@ -30,8 +30,9 @@ use turbo_tasks::{
 use crate::{
     backend::{cell_data::CellData, counter_map::CounterMap},
     data::{
-        ActivenessState, AggregationNumber, CellRef, CollectibleRef, CollectiblesRef, Dirtyness,
-        InProgressCellState, InProgressState, LeafDistance, OutputValue, RootType, TransientTask,
+        ActivenessState, AggregationNumber, CellDependency, CellDependent, CollectibleRef,
+        CollectiblesRef, Dirtyness, InProgressCellState, InProgressState, LeafDistance,
+        OutputValue, RootType, TransientTask,
     },
 };
 
@@ -249,7 +250,7 @@ struct TaskStorageSchema {
         shrink_on_completion,
         drop_on_completion_if_immutable
     )]
-    cell_dependencies: AutoSet<(CellRef, Option<u64>)>,
+    cell_dependencies: AutoSet<CellDependency>,
 
     /// Collectibles this task depends on.
     #[field(
@@ -267,7 +268,7 @@ struct TaskStorageSchema {
 
     /// Outdated cell dependencies to be cleaned up (transient).
     #[field(storage = "auto_set", category = "transient", shrink_on_completion)]
-    outdated_cell_dependencies: AutoSet<(CellRef, Option<u64>)>,
+    outdated_cell_dependencies: AutoSet<CellDependency>,
 
     /// Outdated collectibles dependencies to be cleaned up (transient).
     #[field(storage = "auto_set", category = "transient", shrink_on_completion)]
@@ -282,7 +283,7 @@ struct TaskStorageSchema {
         filter_transient,
         drop_on_completion_if_immutable
     )]
-    cell_dependents: AutoSet<(CellId, Option<u64>, TaskId)>,
+    cell_dependents: AutoSet<CellDependent>,
 
     /// Tasks that depend on collectibles of a specific type from this task.
     /// Maps TraitTypeId -> Set<TaskId>
@@ -682,14 +683,14 @@ impl IsTransient for (TraitTypeId, TaskId) {
         self.1.is_transient()
     }
 }
-impl IsTransient for (CellId, Option<u64>, TaskId) {
+impl IsTransient for CellDependent {
     fn is_transient(&self) -> bool {
-        self.2.is_transient()
+        CellDependent::is_transient(self)
     }
 }
-impl IsTransient for (CellRef, Option<u64>) {
+impl IsTransient for CellDependency {
     fn is_transient(&self) -> bool {
-        self.0.task.is_transient()
+        CellDependency::is_transient(self)
     }
 }
 
@@ -700,7 +701,9 @@ mod tests {
     use turbo_tasks::{CellId, TaskId};
 
     use super::*;
-    use crate::data::{AggregationNumber, CellRef, Dirtyness, OutputValue};
+    use crate::data::{
+        AggregationNumber, CellDependency, CellDependent, CellRef, Dirtyness, OutputValue,
+    };
 
     #[test]
     fn test_accessors() {
@@ -986,16 +989,15 @@ mod tests {
         original
             .output_dependencies_mut()
             .insert(TaskId::new(200).unwrap());
-        original.cell_dependencies_mut().insert((
-            CellRef {
+        original
+            .cell_dependencies_mut()
+            .insert(CellDependency::All(CellRef {
                 task: TaskId::new(1).unwrap(),
                 cell: CellId {
                     type_id: unsafe { turbo_tasks::ValueTypeId::new_unchecked(1) },
                     index: 0,
                 },
-            },
-            None,
-        ));
+            }));
 
         // Set lazy data transient field (should NOT be serialized)
         original
@@ -1114,6 +1116,11 @@ mod tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn test_schema_size() {
+        // `LazyField` is 48 B because the largest payloads (`AutoSet<CellDependency>` and
+        // `AutoSet<CellDependent>`) are 40 B + 8 B discriminant. The 8 B discriminant only
+        // exists because of niche unavailability across the rest of the variants — the
+        // niche on `ValueTypeId` inside `CellRef` makes the cell-dependency payload itself
+        // 24 B.
         assert_eq!(
             size_of::<TaskStorage>(),
             136,
@@ -1121,8 +1128,92 @@ mod tests {
         );
         assert_eq!(
             size_of::<LazyField>(),
-            56,
+            48,
             "LazyField size changed! If this is intentional, update this test."
         );
+        assert_eq!(size_of::<CellData>(), 40);
+    }
+
+    /// Print the size of every lazy field's payload type. Run with:
+    ///   cargo test -p turbo-tasks-backend --lib
+    /// backend::storage_schema::tests::print_lazy_payload_sizes -- --nocapture Used to identify
+    /// which payload dominates `LazyField`'s overall size.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn print_lazy_payload_sizes() {
+        macro_rules! show {
+            ($t:ty) => {
+                println!(
+                    "  {:>4} B  align {:>2}   {}",
+                    size_of::<$t>(),
+                    std::mem::align_of::<$t>(),
+                    stringify!($t)
+                );
+            };
+        }
+        println!("--- lazy field payload sizes ---");
+        show!(CounterMap<CollectibleRef, i32>);
+        show!(Dirtyness);
+        show!(i32);
+        show!(CounterMap<TaskId, i32>);
+        show!(AutoSet<TaskId>);
+        show!(CounterMap<TaskId, u32>);
+        show!(AutoSet<(CellRef, Option<u64>)>);
+        show!(AutoSet<CollectiblesRef>);
+        show!(AutoSet<(CellId, Option<u64>, TaskId)>);
+        show!(AutoSet<(TraitTypeId, TaskId)>);
+        show!(CellData);
+        show!(AutoMap<CellId, CellHash>);
+        show!(AutoMap<ValueTypeId, u32>);
+        show!(ActivenessState);
+        show!(InProgressState);
+        show!(AutoMap<CellId, InProgressCellState>);
+        show!(Arc<TransientTask>);
+        println!("--- composite ---");
+        show!(LazyField);
+        show!(LazyField2);
+
+        println!("--- cell-dependency element experiments ---");
+        show!(CellRef);
+        show!(CellDependency);
+        show!(AutoSet<CellDependency>);
+        show!(CellDependent);
+        show!(AutoSet<CellDependent>);
+    }
+
+    /// Hand-mirrored copy of the macro-generated `LazyField` enum, kept so layout experiments
+    /// (boxing big variants, splitting hot/cold, etc.) can be tried without round-tripping
+    /// through the proc-macro. Annotated with measured payload sizes from
+    /// `print_lazy_payload_sizes`.
+    #[doc = "All lazily-allocated fields stored in a single Vec."]
+    #[doc = "Fields are stored directly (unboxed) to avoid allocation overhead."]
+    #[derive(Debug, Clone, PartialEq, turbo_tasks::ShrinkToFit)]
+    #[shrink_to_fit(crate = "turbo_tasks::macro_helpers::shrink_to_fit")]
+    pub enum LazyField2 {
+        Collectibles(CounterMap<CollectibleRef, i32>),
+        AggregatedCollectibles(CounterMap<CollectibleRef, i32>),
+        OutdatedCollectibles(CounterMap<CollectibleRef, i32>),
+        Dirty(Dirtyness),
+        AggregatedDirtyContainerCount(i32),
+        AggregatedDirtyContainers(CounterMap<TaskId, i32>),
+        AggregatedCurrentSessionCleanContainerCount(i32),
+        AggregatedCurrentSessionCleanContainers(CounterMap<TaskId, i32>),
+        Children(AutoSet<TaskId>),
+        Followers(CounterMap<TaskId, u32>),
+        OutputDependencies(AutoSet<TaskId>),
+        CellDependencies(AutoSet<CellDependency>),
+        CollectiblesDependencies(AutoSet<CollectiblesRef>),
+        OutdatedOutputDependencies(AutoSet<TaskId>),
+        OutdatedCellDependencies(AutoSet<CellDependency>),
+        OutdatedCollectiblesDependencies(AutoSet<CollectiblesRef>),
+        CellDependents(AutoSet<CellDependent>),
+        CollectiblesDependents(AutoSet<(TraitTypeId, TaskId)>),
+        CellData(CellData),                                    // 40
+        CellDataHash(AutoMap<CellId, CellHash>),               // 40
+        CellTypeMaxIndex(AutoMap<ValueTypeId, u32>),           // 32
+        Activeness(ActivenessState),                           // 16
+        InProgress(InProgressState),                           // 16
+        InProgressCells(AutoMap<CellId, InProgressCellState>), //32
+        TransientTaskType(Arc<TransientTask>),
     }
 }
