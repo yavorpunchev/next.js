@@ -34,8 +34,8 @@ use turbo_tasks::{
     TaskExecutionReason, TaskId, TaskPersistence, TaskPriority, TraitTypeId, TurboTasksBackendApi,
     TurboTasksPanic, ValueTypeId,
     backend::{
-        Backend, CachedTaskType, CellContent, CellHash, TaskExecutionSpec, TransientTaskType,
-        TurboTaskContextError, TurboTaskLocalContextError, TurboTasksError,
+        Backend, CachedTaskType, CachedTaskTypeArc, CellContent, CellHash, TaskExecutionSpec,
+        TransientTaskType, TurboTaskContextError, TurboTaskLocalContextError, TurboTasksError,
         TurboTasksExecutionError, TurboTasksExecutionErrorMessage, TypedCellContent,
         VerificationMode,
     },
@@ -175,7 +175,7 @@ struct TurboTasksBackendInner<B: BackingStorage> {
     persisted_task_id_factory: IdFactoryWithReuse<TaskId>,
     transient_task_id_factory: IdFactoryWithReuse<TaskId>,
 
-    task_cache: FxDashMap<Arc<CachedTaskType>, TaskId>,
+    task_cache: FxDashMap<CachedTaskTypeArc, TaskId>,
 
     storage: Storage,
 
@@ -1512,7 +1512,7 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
                     // Only now do we force the allocation.
                     // NOTE: if our caller had to perform resolution, then this will have already
                     // been boxed and take_box just takes it.
-                    let task_type = Arc::new(CachedTaskType {
+                    let task_type = CachedTaskTypeArc::new(CachedTaskType {
                         native_fn,
                         this,
                         arg: arg.take_box(),
@@ -1731,7 +1731,7 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
         }
     }
 
-    fn debug_get_cached_task_type(&self, task_id: TaskId) -> Option<Arc<CachedTaskType>> {
+    fn debug_get_cached_task_type(&self, task_id: TaskId) -> Option<CachedTaskTypeArc> {
         let task = self.storage.access_mut(task_id);
         task.get_persistent_task_type().cloned()
     }

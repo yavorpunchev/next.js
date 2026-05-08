@@ -22,7 +22,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use turbo_tasks::{
     CellId, SharedReference, TaskExecutionReason, TaskId, TraitTypeId, ValueTypeId,
-    backend::{CachedTaskType, CellHash, TransientTaskType},
+    backend::{CachedTaskTypeArc, CellHash, TransientTaskType},
     event::Event,
     task_storage,
 };
@@ -340,7 +340,7 @@ struct TaskStorageSchema {
     in_progress_cells: AutoMap<CellId, InProgressCellState>,
 
     #[field(storage = "direct", category = "data", inline)]
-    pub persistent_task_type: Option<Arc<CachedTaskType>>,
+    pub persistent_task_type: Option<CachedTaskTypeArc>,
 
     #[field(storage = "direct", category = "transient")]
     pub transient_task_type: Arc<TransientTask>,
