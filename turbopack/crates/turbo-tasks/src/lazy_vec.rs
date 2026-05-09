@@ -388,7 +388,7 @@ impl<T> Drop for LazyVec<T> {
         if self.len > 0 {
             // SAFETY: we own `len` initialized elements at the start of the buffer.
             unsafe {
-                ptr::drop_in_place(std::slice::from_raw_parts_mut(
+                ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(
                     self.ptr.as_ptr(),
                     self.len(),
                 ));

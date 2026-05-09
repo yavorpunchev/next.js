@@ -701,9 +701,7 @@ mod tests {
     use turbo_tasks::{CellId, TaskId};
 
     use super::*;
-    use crate::data::{
-        AggregationNumber, CellDependency, CellDependent, CellRef, Dirtyness, OutputValue,
-    };
+    use crate::data::{AggregationNumber, CellDependency, CellRef, Dirtyness, OutputValue};
 
     #[test]
     fn test_accessors() {
@@ -1136,88 +1134,5 @@ mod tests {
             "LazyField size changed! If this is intentional, update this test."
         );
         assert_eq!(size_of::<CellData>(), 40);
-    }
-
-    /// Print the size of every lazy field's payload type. Run with:
-    ///   cargo test -p turbo-tasks-backend --lib
-    /// backend::storage_schema::tests::print_lazy_payload_sizes -- --nocapture Used to identify
-    /// which payload dominates `LazyField`'s overall size.
-    #[test]
-    #[cfg(target_pointer_width = "64")]
-    fn print_lazy_payload_sizes() {
-        macro_rules! show {
-            ($t:ty) => {
-                println!(
-                    "  {:>4} B  align {:>2}   {}",
-                    size_of::<$t>(),
-                    std::mem::align_of::<$t>(),
-                    stringify!($t)
-                );
-            };
-        }
-        println!("--- lazy field payload sizes ---");
-        show!(CounterMap<CollectibleRef, i32>);
-        show!(Dirtyness);
-        show!(i32);
-        show!(CounterMap<TaskId, i32>);
-        show!(AutoSet<TaskId>);
-        show!(CounterMap<TaskId, u32>);
-        show!(AutoSet<(CellRef, Option<u64>)>);
-        show!(AutoSet<CollectiblesRef>);
-        show!(AutoSet<(CellId, Option<u64>, TaskId)>);
-        show!(AutoSet<(TraitTypeId, TaskId)>);
-        show!(CellData);
-        show!(AutoMap<CellId, CellHash>);
-        show!(AutoMap<ValueTypeId, u32>);
-        show!(ActivenessState);
-        show!(InProgressState);
-        show!(AutoMap<CellId, InProgressCellState>);
-        show!(Arc<TransientTask>);
-        println!("--- composite ---");
-        show!(LazyField);
-        show!(LazyField2);
-
-        println!("--- cell-dependency element experiments ---");
-        show!(CellRef);
-        show!(CellDependency);
-        show!(AutoSet<CellDependency>);
-        show!(CellDependent);
-        show!(AutoSet<CellDependent>);
-    }
-
-    /// Hand-mirrored copy of the macro-generated `LazyField` enum, kept so layout experiments
-    /// (boxing big variants, splitting hot/cold, etc.) can be tried without round-tripping
-    /// through the proc-macro. Annotated with measured payload sizes from
-    /// `print_lazy_payload_sizes`.
-    #[doc = "All lazily-allocated fields stored in a single Vec."]
-    #[doc = "Fields are stored directly (unboxed) to avoid allocation overhead."]
-    #[derive(Debug, Clone, PartialEq, turbo_tasks::ShrinkToFit)]
-    #[shrink_to_fit(crate = "turbo_tasks::macro_helpers::shrink_to_fit")]
-    pub enum LazyField2 {
-        Collectibles(CounterMap<CollectibleRef, i32>),
-        AggregatedCollectibles(CounterMap<CollectibleRef, i32>),
-        OutdatedCollectibles(CounterMap<CollectibleRef, i32>),
-        Dirty(Dirtyness),
-        AggregatedDirtyContainerCount(i32),
-        AggregatedDirtyContainers(CounterMap<TaskId, i32>),
-        AggregatedCurrentSessionCleanContainerCount(i32),
-        AggregatedCurrentSessionCleanContainers(CounterMap<TaskId, i32>),
-        Children(AutoSet<TaskId>),
-        Followers(CounterMap<TaskId, u32>),
-        OutputDependencies(AutoSet<TaskId>),
-        CellDependencies(AutoSet<CellDependency>),
-        CollectiblesDependencies(AutoSet<CollectiblesRef>),
-        OutdatedOutputDependencies(AutoSet<TaskId>),
-        OutdatedCellDependencies(AutoSet<CellDependency>),
-        OutdatedCollectiblesDependencies(AutoSet<CollectiblesRef>),
-        CellDependents(AutoSet<CellDependent>),
-        CollectiblesDependents(AutoSet<(TraitTypeId, TaskId)>),
-        CellData(CellData),                                    // 40
-        CellDataHash(AutoMap<CellId, CellHash>),               // 40
-        CellTypeMaxIndex(AutoMap<ValueTypeId, u32>),           // 32
-        Activeness(ActivenessState),                           // 16
-        InProgress(InProgressState),                           // 16
-        InProgressCells(AutoMap<CellId, InProgressCellState>), //32
-        TransientTaskType(Arc<TransientTask>),
     }
 }
