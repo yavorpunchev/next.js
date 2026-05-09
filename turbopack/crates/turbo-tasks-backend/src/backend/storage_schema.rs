@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use turbo_tasks::{
-    CellId, SharedReference, TaskExecutionReason, TaskId, TraitTypeId, ValueTypeId,
+    CellId, LazyVec, SharedReference, TaskExecutionReason, TaskId, TraitTypeId, ValueTypeId,
     backend::{CachedTaskTypeArc, CellHash, TransientTaskType},
     event::Event,
     task_storage,
@@ -1116,16 +1116,20 @@ mod tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn test_schema_size() {
+        //
+        // `TaskStorage` is 128 B: the same 120 B of inline fields + flags as before, plus a
+        // 16 B `LazyVec<LazyField>` (vs `Vec`'s 24 B). Picking up an 8 B saving per task
+        // multiplied by several million tasks live during a build is dozens of MB.
+        assert_eq!(
+            size_of::<TaskStorage>(),
+            128,
+            "TaskStorage size changed! If this is intentional, update this test."
+        );
         // `LazyField` is 48 B because the largest payloads (`AutoSet<CellDependency>` and
         // `AutoSet<CellDependent>`) are 40 B + 8 B discriminant. The 8 B discriminant only
         // exists because of niche unavailability across the rest of the variants — the
         // niche on `ValueTypeId` inside `CellRef` makes the cell-dependency payload itself
         // 24 B.
-        assert_eq!(
-            size_of::<TaskStorage>(),
-            136,
-            "TaskStorage size changed! If this is intentional, update this test."
-        );
         assert_eq!(
             size_of::<LazyField>(),
             48,

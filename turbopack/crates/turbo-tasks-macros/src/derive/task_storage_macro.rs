@@ -1095,12 +1095,18 @@ fn generate_typed_storage_struct(grouped_fields: &GroupedFields) -> TokenStream 
         quote! {}
     };
 
-    // Add lazy vec field if needed (pub(crate) - used by helper methods)
-    // Note: Serialization is handled manually via encode_data/encode_meta methods
+    // Add lazy vec field if needed (pub(crate) - used by helper methods).
+    // Note: Serialization is handled manually via encode_data/encode_meta methods.
+    //
+    // We use `LazyVec` (16 B on 64-bit) instead of `Vec` (24 B) because the schema has at
+    // most ~25 lazy variants and growth never exceeds that, so a `u8` length and capacity
+    // suffice. With several million `TaskStorage`s live during a typical Next.js build this
+    // saves dozens of MB of resident memory. `LazyVec` is resolved at the schema's call
+    // site — the schema must `use turbo_tasks::LazyVec` (or otherwise have it in scope).
     let lazy_field = if has_lazy {
         quote! {
-            #[doc = "Lazily-allocated fields stored in a single Vec for memory efficiency"]
-            lazy: Vec<LazyField>,
+            #[doc = "Lazily-allocated fields stored in a compact LazyVec for memory efficiency"]
+            lazy: LazyVec<LazyField>,
         }
     } else {
         quote! {}
