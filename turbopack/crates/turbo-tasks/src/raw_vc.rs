@@ -310,30 +310,11 @@ pub struct ResolveRawVcFuture {
     strongly_consistent: bool,
     listener: Option<EventListener>,
     /// `Arc<dyn TurboTasksApi>` for the turbo-tasks scope this future was constructed in.
-    ///
-    /// Polling this future is on a hot path. Without this cache, each poll would call
-    /// `with_turbo_tasks(...)` (a `LocalKey::with` access on the `TURBO_TASKS` thread-local),
-    /// which showed up in profiles even though each `LocalKey::with` call is individually
-    /// cheap. We capture at construction rather than on first poll to avoid the
-    /// `Option<...>` branch on the hot path. The future is always constructed inside a
-    /// turbo-tasks scope (via `RawVc::resolve` / `RawVc::into_read`) and cannot legally
-    /// migrate between scopes, so the captured value is valid for the future's lifetime.
     tt: Arc<dyn TurboTasksApi>,
     /// Cached `Arc<RwLock<CurrentTaskState>>` for resolving `RawVc::LocalOutput` without going
-    /// through `CURRENT_TASK_STATE.with(...)` on every poll.
-    ///
-    /// `foo(bar).await` patterns produce `RawVc::LocalOutput` values that this future polls
-    /// repeatedly until ready. Each previous poll did a `LocalKey::with` on `CURRENT_TASK_STATE`
-    /// inside the `try_read_local_output` trait method. The state `Arc` does not change across
-    /// polls of the same future, so we cache it lazily on first use — many futures never hit a
-    /// `LocalOutput` so we don't want to pay the lookup eagerly.
-    ///
-    /// TODO: in the steady state we only need to access this **at most twice** per future
-    /// (once to fetch the listener, once to read the resolved value). Restructuring
-    /// `try_read_local_output` to return its own future — owning the listener internally
-    /// and yielding the value when ready — would let us drop this cache entirely. Today
-    /// the listener pattern forces a re-poll dance on the caller, so we cache the `Arc` to
-    /// keep that re-entry cheap.
+    /// through `CURRENT_TASK_STATE.with(...)` on every poll.  We should only ever poll local task
+    /// state at most twice assuming the event listener mechanism works.  so this field saves us
+    /// one task local touch.
     cts: Option<Arc<RwLock<CurrentTaskState>>>,
 }
 
@@ -465,9 +446,6 @@ pub struct ReadRawVcFuture {
 
 impl ReadRawVcFuture {
     pub(crate) fn new(vc: RawVc) -> Self {
-        // Capture `Arc<dyn TurboTasksApi>` once at construction; the inner
-        // `ResolveRawVcFuture` borrows it from `self.resolve.tt` for both phase 1 and
-        // phase 2 polls. One `LocalKey::with` for the lifetime of both phases.
         ReadRawVcFuture {
             resolve: ResolveRawVcFuture::new(vc),
             read_cell_options: ReadCellOptions::default(),
