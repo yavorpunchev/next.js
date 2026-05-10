@@ -136,12 +136,7 @@ impl_borrow_decode!(CachedTaskType);
 /// `triomphe::Arc` saves one `usize` per allocation (no weak count) and avoids the weak-count
 /// CAS in `drop_slow` compared to `std::sync::Arc`. We never need `Weak<CachedTaskType>`, so
 /// the trade-off is favorable.
-///
-/// We wrap it in a newtype so we can implement the foreign `bincode::Encode` /
-/// `bincode::Decode` traits — the orphan rule forbids implementing them on
-/// `triomphe::Arc<CachedTaskType>` directly because `bincode::Decode<Context>` has a free
-/// `Context` parameter that is not covered by a local type.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct CachedTaskTypeArc(pub triomphe::Arc<CachedTaskType>);
 
 impl CachedTaskTypeArc {
@@ -173,13 +168,6 @@ impl PartialEq for CachedTaskTypeArc {
 }
 
 impl Eq for CachedTaskTypeArc {}
-
-impl Hash for CachedTaskTypeArc {
-    #[inline]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (**self).hash(state);
-    }
-}
 
 impl Display for CachedTaskTypeArc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

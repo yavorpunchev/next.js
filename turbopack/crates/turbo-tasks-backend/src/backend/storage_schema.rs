@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use turbo_tasks::{
-    CellId, LazyVec, SharedReference, TaskExecutionReason, TaskId, TraitTypeId, ValueTypeId,
+    CellId, SharedReference, TaskExecutionReason, TaskId, TinyVec, TraitTypeId, ValueTypeId,
     backend::{CachedTaskTypeArc, CellHash, TransientTaskType},
     event::Event,
     task_storage,
@@ -30,9 +30,9 @@ use turbo_tasks::{
 use crate::{
     backend::{cell_data::CellData, counter_map::CounterMap},
     data::{
-        ActivenessState, AggregationNumber, CellDependency, CellDependent, CollectibleRef,
-        CollectiblesRef, Dirtyness, InProgressCellState, InProgressState, LeafDistance,
-        OutputValue, RootType, TransientTask,
+        ActivenessState, AggregationNumber, CellDependency, CollectibleRef, CollectiblesRef,
+        Dirtyness, InProgressCellState, InProgressState, LeafDistance, OutputValue, RootType,
+        TransientTask,
     },
 };
 
@@ -53,7 +53,7 @@ type AutoMap<K, V> =
 /// - `TaskFlags` bitfield for boolean flags
 /// - Accessor methods and traits
 ///
-/// Fields are stored lazily in `Vec<LazyField>` by default for memory efficiency.
+/// Fields are stored lazily in `TinyVec<LazyField>` by default for memory efficiency.
 /// Fields with `inline` are stored directly on TaskStorage (for hot-path access).
 ///
 /// Note: This struct is consumed by the macro and does not appear in the output.
@@ -283,7 +283,7 @@ struct TaskStorageSchema {
         filter_transient,
         drop_on_completion_if_immutable
     )]
-    cell_dependents: AutoSet<CellDependent>,
+    cell_dependents: AutoSet<CellDependency>,
 
     /// Tasks that depend on collectibles of a specific type from this task.
     /// Maps TraitTypeId -> Set<TaskId>
@@ -681,11 +681,6 @@ trait IsTransient {
 impl IsTransient for (TraitTypeId, TaskId) {
     fn is_transient(&self) -> bool {
         self.1.is_transient()
-    }
-}
-impl IsTransient for CellDependent {
-    fn is_transient(&self) -> bool {
-        CellDependent::is_transient(self)
     }
 }
 impl IsTransient for CellDependency {
@@ -1111,27 +1106,82 @@ mod tests {
     // Schema Size Tests
     // ==========================================================================
 
+    /// Prints the sizes of every inline + lazy field type along with the resulting
+    /// `TaskStorage` and `LazyField` totals, so the hand-written commentary in
+    /// [`test_schema_size`] can be updated when the schema shifts. Run with:
+    ///
+    ///   cargo test -p turbo-tasks-backend --lib backend::storage_schema::tests::print_schema_sizes
+    /// -- --nocapture
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn print_schema_sizes() {
+        macro_rules! show {
+            ($t:ty) => {
+                println!(
+                    "  {:>4} B  align {:>2}   {}",
+                    size_of::<$t>(),
+                    std::mem::align_of::<$t>(),
+                    stringify!($t)
+                );
+            };
+        }
+        let inline_sum = size_of::<LeafDistance>()
+            + size_of::<AggregationNumber>()
+            + size_of::<AutoSet<TaskId>>()
+            + size_of::<Option<OutputValue>>()
+            + size_of::<CounterMap<TaskId, u32>>()
+            + size_of::<Option<CachedTaskTypeArc>>()
+            + size_of::<Arc<TransientTask>>();
+        let lazy_field_size = size_of::<LazyField>();
+        let tiny_vec_size = size_of::<TinyVec<LazyField>>();
+        let flags_size = size_of::<TaskFlags>();
+        let total_naive = inline_sum + flags_size + tiny_vec_size;
+        let total_actual = size_of::<TaskStorage>();
+        println!("--- inline fields ---");
+        show!(LeafDistance);
+        show!(AggregationNumber);
+        show!(AutoSet<TaskId>);
+        show!(Option<OutputValue>);
+        show!(CounterMap<TaskId, u32>);
+        show!(Option<CachedTaskTypeArc>);
+        show!(Arc<TransientTask>);
+        println!("  inline_sum = {inline_sum} B");
+        println!("--- other TaskStorage members ---");
+        show!(TaskFlags);
+        show!(TinyVec<LazyField>);
+        println!("--- totals ---");
+        println!("  naive sum = {total_naive} B");
+        println!("  size_of::<TaskStorage>() = {total_actual} B");
+        // Negative slack means Rust's struct layout packed fields more tightly than the
+        // naive sum (e.g. by reordering members so smaller fields fit into alignment gaps
+        // of larger ones). Positive slack is wasted padding.
+        println!(
+            "  slack = {} B (negative = layout packed better than naive sum)",
+            total_actual as isize - total_naive as isize,
+        );
+        println!("--- LazyField ---");
+        show!(LazyField);
+        println!("  largest payload pins this at {lazy_field_size} B");
+    }
+
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn test_schema_size() {
-        //
-        // `TaskStorage` is 128 B: the same 120 B of inline fields + flags as before, plus a
-        // 16 B `LazyVec<LazyField>` (vs `Vec`'s 24 B). Picking up an 8 B saving per task
-        // multiplied by several million tasks live during a build is dozens of MB.
+        // `TaskStorage` is 128 B. The seven inline-field types sum to 116 B, plus 2 B of
+        // `TaskFlags` and 16 B of `TinyVec<LazyField>` for a naive total of 134 B; Rust's
+        // struct layout packs that down to 128 B (-6 B vs naive) by reordering small fields
+        // into the alignment gaps of larger ones. There is **no slack** to fit additional
+        // fields without growing the struct. See [`print_schema_sizes`] for the breakdown.
         assert_eq!(
             size_of::<TaskStorage>(),
             128,
-            "TaskStorage size changed! If this is intentional, update this test."
+            "TaskStorage size changed! Run print_schema_sizes and update this test."
         );
-        // `LazyField` is 48 B because the largest payloads (`AutoSet<CellDependency>` and
-        // `AutoSet<CellDependent>`) are 40 B + 8 B discriminant. The 8 B discriminant only
-        // exists because of niche unavailability across the rest of the variants — the
-        // niche on `ValueTypeId` inside `CellRef` makes the cell-dependency payload itself
-        // 24 B.
+        // `LazyField` is 48 B = 40 B largest payload + 8 B discriminant.
         assert_eq!(
             size_of::<LazyField>(),
             48,
-            "LazyField size changed! If this is intentional, update this test."
+            "LazyField size changed! Run print_schema_sizes and update this test."
         );
         assert_eq!(size_of::<CellData>(), 40);
     }

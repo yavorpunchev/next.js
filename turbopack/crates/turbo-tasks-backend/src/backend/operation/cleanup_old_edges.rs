@@ -17,7 +17,7 @@ use crate::{
         },
         storage_schema::TaskStorageAccessors,
     },
-    data::{CellDependency, CellDependent, CellRef, CollectibleRef, CollectiblesRef},
+    data::{CellDependency, CellRef, CollectibleRef, CollectiblesRef},
 };
 
 #[derive(Encode, Decode, Clone)]
@@ -174,8 +174,16 @@ impl CleanupOldEdgesOperation {
                                 let key = dep.key();
                                 {
                                     let mut task = ctx.task(cell_task_id, TaskDataCategory::Data);
-                                    task.remove_cell_dependents(&CellDependent::new(
-                                        cell, task_id, key,
+                                    // The `cell_dependents` set on the dependee task is keyed
+                                    // by `(cell, task_id, key)`. Re-encode that as a
+                                    // `CellDependency` whose `CellRef.task` is the dependent
+                                    // task — same bits, opposite direction.
+                                    task.remove_cell_dependents(&CellDependency::new(
+                                        CellRef {
+                                            task: task_id,
+                                            cell,
+                                        },
+                                        key,
                                     ));
                                 }
                                 {

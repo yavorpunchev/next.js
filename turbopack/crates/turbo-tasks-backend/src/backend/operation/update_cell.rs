@@ -138,7 +138,12 @@ impl UpdateCellOperation {
                 FxIndexMap::default();
             if !skip_invalidation {
                 let tasks_with_keys = task.iter_cell_dependents().filter_map(|dep| {
-                    let dependent_cell = dep.cell();
+                    // `cell_dependents` reuses `CellDependency`, but with the dependent task
+                    // stored in `CellRef.task` and the storing task's cell in `CellRef.cell`.
+                    let CellRef {
+                        task: dependent_task,
+                        cell: dependent_cell,
+                    } = dep.cell_ref();
                     let key = dep.key();
                     (dependent_cell == cell
                         && key.is_none_or(|key_hash| {
@@ -146,7 +151,7 @@ impl UpdateCellOperation {
                                 .as_ref()
                                 .is_none_or(|set| set.contains(&key_hash))
                         }))
-                    .then_some((dep.task(), key))
+                    .then_some((dependent_task, key))
                 });
                 for (task, key) in tasks_with_keys {
                     dependent_tasks.entry(task).or_default().push(key);

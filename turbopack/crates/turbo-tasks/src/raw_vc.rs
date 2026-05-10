@@ -325,6 +325,13 @@ pub struct ResolveRawVcFuture {
     /// repeatedly until ready. Each previous poll did a `LocalKey::with` on `CURRENT_TASK_STATE`
     /// inside the `try_read_local_output` trait method. The state `Arc` does not change across
     /// polls of the same future, so we cache it here on first use.
+    ///
+    /// TODO: in the steady state we only need to access this **at most twice** per future
+    /// (once to fetch the listener, once to read the resolved value). Restructuring
+    /// `try_read_local_output` to return its own future — owning the listener internally
+    /// and yielding the value when ready — would let us drop this cache entirely. Today
+    /// the listener pattern forces a re-poll dance on the caller, so we cache the `Arc` to
+    /// keep that re-entry cheap.
     cts: Option<Arc<RwLock<CurrentTaskState>>>,
 }
 

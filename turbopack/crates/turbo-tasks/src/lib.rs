@@ -29,7 +29,6 @@ mod id_factory;
 mod invalidation;
 mod join_iter_ext;
 pub mod keyed;
-mod lazy_vec;
 mod local_task_tracker;
 #[doc(hidden)]
 pub mod macro_helpers;
@@ -56,6 +55,7 @@ mod state;
 pub mod task;
 mod task_execution_reason;
 pub mod task_statistics;
+mod tiny_vec;
 pub mod trace;
 mod trait_ref;
 mod triomphe_utils;
@@ -88,7 +88,6 @@ pub use crate::{
         get_invalidator,
     },
     join_iter_ext::{JoinIterExt, TryFlatJoinIterExt, TryJoinIterExt},
-    lazy_vec::LazyVec,
     manager::{
         CurrentCellRef, ReadCellTracking, ReadConsistency, ReadTracking, TaskPersistence,
         TaskPriority, TurboTasks, TurboTasksApi, TurboTasksBackendApi, TurboTasksCallApi, Unused,
@@ -110,6 +109,7 @@ pub use crate::{
         task_input::{EitherTaskInput, TaskInput},
     },
     task_execution_reason::TaskExecutionReason,
+    tiny_vec::TinyVec,
     trait_ref::TraitRef,
     value::{TransientInstance, TransientValue},
     value_type::{TraitMethod, TraitType, ValueType, ValueTypePersistence},

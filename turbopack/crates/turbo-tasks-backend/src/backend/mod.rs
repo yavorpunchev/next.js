@@ -70,9 +70,8 @@ use crate::{
     },
     backing_storage::{BackingStorage, SnapshotItem, compute_task_type_hash},
     data::{
-        ActivenessState, CellDependency, CellDependent, CellRef, CollectibleRef, CollectiblesRef,
-        Dirtyness, InProgressCellState, InProgressState, InProgressStateInner, OutputValue,
-        TransientTask,
+        ActivenessState, CellDependency, CellRef, CollectibleRef, CollectiblesRef, Dirtyness,
+        InProgressCellState, InProgressState, InProgressStateInner, OutputValue, TransientTask,
     },
     error::TaskError,
     utils::{
@@ -769,7 +768,8 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
                 && (!task.immutable() || cfg!(feature = "verify_immutable"))
             {
                 let reader = reader.unwrap();
-                let _ = task.add_cell_dependents(CellDependent::new(cell, reader, key));
+                let _ = task
+                    .add_cell_dependents(CellDependency::new(CellRef { task: reader, cell }, key));
                 drop(task);
 
                 // Note: We use `task_pair` earlier to lock the task and its reader at the same

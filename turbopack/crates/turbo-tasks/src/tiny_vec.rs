@@ -23,7 +23,7 @@ use std::{
 };
 
 /// Compact `Vec`-shaped container; see module docs for rationale.
-pub struct LazyVec<T> {
+pub struct TinyVec<T> {
     /// Heap pointer. Dangling (uninitialized) when `cap == 0`.
     ptr: NonNull<T>,
     len: u8,
@@ -33,11 +33,11 @@ pub struct LazyVec<T> {
 }
 
 // SAFETY: same as `Vec<T>` — we own a heap allocation of `T`s, and the only shared state is via
-// the `ptr` which is unique to this `LazyVec`.
-unsafe impl<T: Send> Send for LazyVec<T> {}
-unsafe impl<T: Sync> Sync for LazyVec<T> {}
+// the `ptr` which is unique to this `TinyVec`.
+unsafe impl<T: Send> Send for TinyVec<T> {}
+unsafe impl<T: Sync> Sync for TinyVec<T> {}
 
-impl<T> Default for LazyVec<T> {
+impl<T> Default for TinyVec<T> {
     fn default() -> Self {
         Self {
             ptr: NonNull::dangling(),
@@ -48,7 +48,7 @@ impl<T> Default for LazyVec<T> {
     }
 }
 
-impl<T> LazyVec<T> {
+impl<T> TinyVec<T> {
     pub const fn new() -> Self {
         Self {
             ptr: NonNull::dangling(),
@@ -161,7 +161,7 @@ impl<T> LazyVec<T> {
     fn realloc_to(&mut self, new_cap: usize) {
         assert!(
             new_cap <= u8::MAX as usize,
-            "LazyVec capacity overflow: requested {new_cap}, max {}",
+            "TinyVec capacity overflow: requested {new_cap}, max {}",
             u8::MAX
         );
         if new_cap == self.cap as usize {
@@ -174,7 +174,7 @@ impl<T> LazyVec<T> {
         }
 
         // Allocate new buffer.
-        let new_layout = Layout::array::<T>(new_cap).expect("LazyVec layout overflow");
+        let new_layout = Layout::array::<T>(new_cap).expect("TinyVec layout overflow");
         // SAFETY: Layout has nonzero size because new_cap > 0 (or we'd not be here) and T is
         // nonzero-sized (handled above).
         let new_ptr = unsafe { alloc(new_layout) } as *mut T;
@@ -204,7 +204,7 @@ impl<T> LazyVec<T> {
             return;
         }
         let old_layout =
-            Layout::array::<T>(self.cap as usize).expect("LazyVec layout was valid when allocated");
+            Layout::array::<T>(self.cap as usize).expect("TinyVec layout was valid when allocated");
         // SAFETY: ptr came from `alloc` with this layout in `realloc_to`.
         unsafe {
             dealloc(self.ptr.as_ptr() as *mut u8, old_layout);
@@ -225,7 +225,7 @@ impl<T> LazyVec<T> {
         }
         let new_cap = self.len as usize;
         // Allocate a smaller buffer, copy, free old.
-        let new_layout = Layout::array::<T>(new_cap).expect("LazyVec layout overflow");
+        let new_layout = Layout::array::<T>(new_cap).expect("TinyVec layout overflow");
         // SAFETY: layout is nonzero (new_cap > 0, T is nonzero-sized — ZST early-returned via the
         // len == cap check above since cap = 0 for ZSTs would also trigger the equal branch).
         let new_ptr = unsafe { alloc(new_layout) } as *mut T;
@@ -243,33 +243,33 @@ impl<T> LazyVec<T> {
     }
 }
 
-impl<T> std::ops::Index<usize> for LazyVec<T> {
+impl<T> std::ops::Index<usize> for TinyVec<T> {
     type Output = T;
     fn index(&self, idx: usize) -> &T {
         &self.as_slice()[idx]
     }
 }
 
-impl<T> std::ops::IndexMut<usize> for LazyVec<T> {
+impl<T> std::ops::IndexMut<usize> for TinyVec<T> {
     fn index_mut(&mut self, idx: usize) -> &mut T {
         &mut self.as_mut_slice()[idx]
     }
 }
 
-impl<T> std::ops::Deref for LazyVec<T> {
+impl<T> std::ops::Deref for TinyVec<T> {
     type Target = [T];
     fn deref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-impl<T> std::ops::DerefMut for LazyVec<T> {
+impl<T> std::ops::DerefMut for TinyVec<T> {
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
     }
 }
 
-impl<T> Extend<T> for LazyVec<T> {
+impl<T> Extend<T> for TinyVec<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
         let (lo, _) = iter.size_hint();
@@ -282,7 +282,7 @@ impl<T> Extend<T> for LazyVec<T> {
     }
 }
 
-impl<T> FromIterator<T> for LazyVec<T> {
+impl<T> FromIterator<T> for TinyVec<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut v = Self::new();
         v.extend(iter);
@@ -290,7 +290,7 @@ impl<T> FromIterator<T> for LazyVec<T> {
     }
 }
 
-impl<T> IntoIterator for LazyVec<T> {
+impl<T> IntoIterator for TinyVec<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
 
@@ -311,7 +311,7 @@ impl<T> IntoIterator for LazyVec<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a LazyVec<T> {
+impl<'a, T> IntoIterator for &'a TinyVec<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
     fn into_iter(self) -> std::slice::Iter<'a, T> {
@@ -319,7 +319,7 @@ impl<'a, T> IntoIterator for &'a LazyVec<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut LazyVec<T> {
+impl<'a, T> IntoIterator for &'a mut TinyVec<T> {
     type Item = &'a mut T;
     type IntoIter = std::slice::IterMut<'a, T>;
     fn into_iter(self) -> std::slice::IterMut<'a, T> {
@@ -327,7 +327,7 @@ impl<'a, T> IntoIterator for &'a mut LazyVec<T> {
     }
 }
 
-/// Owning iterator returned by [`LazyVec::into_iter`].
+/// Owning iterator returned by [`TinyVec::into_iter`].
 pub struct IntoIter<T> {
     /// The underlying buffer (kept so we can deallocate in Drop).
     buf: NonNull<T>,
@@ -367,7 +367,7 @@ impl<T> Drop for IntoIter<T> {
         // Deallocate the buffer.
         if self.cap > 0 && size_of::<T>() != 0 {
             let layout = Layout::array::<T>(self.cap as usize)
-                .expect("LazyVec layout was valid when allocated");
+                .expect("TinyVec layout was valid when allocated");
             // SAFETY: buf was allocated via `alloc` with this layout.
             unsafe {
                 dealloc(self.buf.as_ptr() as *mut u8, layout);
@@ -376,13 +376,13 @@ impl<T> Drop for IntoIter<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for LazyVec<T> {
+impl<T: fmt::Debug> fmt::Debug for TinyVec<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
 }
 
-impl<T> Drop for LazyVec<T> {
+impl<T> Drop for TinyVec<T> {
     fn drop(&mut self) {
         // Drop populated elements in place.
         if self.len > 0 {
@@ -398,7 +398,7 @@ impl<T> Drop for LazyVec<T> {
     }
 }
 
-impl<T> shrink_to_fit::ShrinkToFit for LazyVec<T> {
+impl<T> shrink_to_fit::ShrinkToFit for TinyVec<T> {
     fn shrink_to_fit(&mut self) {
         Self::shrink_to_fit(self);
     }
@@ -411,13 +411,13 @@ mod tests {
     #[test]
     fn size() {
         // The whole point: 16 B on 64-bit, vs 24 B for Vec.
-        assert_eq!(std::mem::size_of::<LazyVec<u64>>(), 16);
-        assert_eq!(std::mem::size_of::<LazyVec<[u8; 48]>>(), 16);
+        assert_eq!(std::mem::size_of::<TinyVec<u64>>(), 16);
+        assert_eq!(std::mem::size_of::<TinyVec<[u8; 48]>>(), 16);
     }
 
     #[test]
     fn push_iter_swap_remove() {
-        let mut v: LazyVec<u32> = LazyVec::new();
+        let mut v: TinyVec<u32> = TinyVec::new();
         assert!(v.is_empty());
         v.push(10);
         v.push(20);
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn growth_pattern() {
-        let mut v: LazyVec<u32> = LazyVec::new();
+        let mut v: TinyVec<u32> = TinyVec::new();
         for i in 0..32u32 {
             v.push(i);
         }
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn extend_and_reserve() {
-        let mut v: LazyVec<u32> = LazyVec::new();
+        let mut v: TinyVec<u32> = TinyVec::new();
         v.extend(0..10);
         assert_eq!(v.len(), 10);
         v.reserve(5);
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn last_mut_and_index_mut() {
-        let mut v: LazyVec<u32> = LazyVec::new();
+        let mut v: TinyVec<u32> = TinyVec::new();
         v.push(1);
         v.push(2);
         *v.last_mut().unwrap() = 99;
@@ -476,7 +476,7 @@ mod tests {
 
         let count = AtomicUsize::new(0);
         {
-            let mut v: LazyVec<DropCounter<'_>> = LazyVec::new();
+            let mut v: TinyVec<DropCounter<'_>> = TinyVec::new();
             v.push(DropCounter(&count));
             v.push(DropCounter(&count));
             v.push(DropCounter(&count));
@@ -496,7 +496,7 @@ mod tests {
         }
 
         let count = AtomicUsize::new(0);
-        let mut v: LazyVec<DropCounter<'_>> = LazyVec::new();
+        let mut v: TinyVec<DropCounter<'_>> = TinyVec::new();
         v.push(DropCounter(&count, 1));
         v.push(DropCounter(&count, 2));
         v.push(DropCounter(&count, 3));
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn shrink_to_fit_releases_buffer() {
-        let mut v: LazyVec<u32> = LazyVec::new();
+        let mut v: TinyVec<u32> = TinyVec::new();
         v.extend(0..10);
         assert!(v.capacity() >= 10);
         for _ in 0..10 {
@@ -524,9 +524,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "LazyVec capacity overflow")]
+    #[should_panic(expected = "TinyVec capacity overflow")]
     fn capacity_overflow_panics() {
-        let mut v: LazyVec<u8> = LazyVec::new();
+        let mut v: TinyVec<u8> = TinyVec::new();
         for _ in 0..255u32 {
             v.push(0);
         }
