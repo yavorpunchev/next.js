@@ -309,22 +309,24 @@ pub struct ResolveRawVcFuture {
     /// during the resolve. This flag indicates that the initial read was strongly consistent.
     strongly_consistent: bool,
     listener: Option<EventListener>,
-    /// Cached `Arc<dyn TurboTasksApi>` for the turbo-tasks scope this future was first polled in.
+    /// `Arc<dyn TurboTasksApi>` for the turbo-tasks scope this future was constructed in.
     ///
-    /// Polling this future is on a hot path. Each poll used to call `with_turbo_tasks(...)` (a
-    /// `LocalKey::with` access on the `TURBO_TASKS` thread-local), which showed up in profiles
-    /// even though each `LocalKey::with` call is individually cheap. By caching the `Arc` on the
-    /// first poll we pay the thread-local lookup once and reuse the clone for every subsequent
-    /// poll. The future cannot legally migrate between turbo-tasks scopes, so the cached value
-    /// is valid for the lifetime of the future.
-    tt: Option<Arc<dyn TurboTasksApi>>,
+    /// Polling this future is on a hot path. Without this cache, each poll would call
+    /// `with_turbo_tasks(...)` (a `LocalKey::with` access on the `TURBO_TASKS` thread-local),
+    /// which showed up in profiles even though each `LocalKey::with` call is individually
+    /// cheap. We capture at construction rather than on first poll to avoid the
+    /// `Option<...>` branch on the hot path. The future is always constructed inside a
+    /// turbo-tasks scope (via `RawVc::resolve` / `RawVc::into_read`) and cannot legally
+    /// migrate between scopes, so the captured value is valid for the future's lifetime.
+    tt: Arc<dyn TurboTasksApi>,
     /// Cached `Arc<RwLock<CurrentTaskState>>` for resolving `RawVc::LocalOutput` without going
     /// through `CURRENT_TASK_STATE.with(...)` on every poll.
     ///
     /// `foo(bar).await` patterns produce `RawVc::LocalOutput` values that this future polls
     /// repeatedly until ready. Each previous poll did a `LocalKey::with` on `CURRENT_TASK_STATE`
     /// inside the `try_read_local_output` trait method. The state `Arc` does not change across
-    /// polls of the same future, so we cache it here on first use.
+    /// polls of the same future, so we cache it lazily on first use — many futures never hit a
+    /// `LocalOutput` so we don't want to pay the lookup eagerly.
     ///
     /// TODO: in the steady state we only need to access this **at most twice** per future
     /// (once to fetch the listener, once to read the resolved value). Restructuring
@@ -337,12 +339,19 @@ pub struct ResolveRawVcFuture {
 
 impl ResolveRawVcFuture {
     fn new(vc: RawVc) -> Self {
+        Self::with_tt(vc, with_turbo_tasks(Arc::clone))
+    }
+
+    /// Constructor that reuses an existing `Arc<dyn TurboTasksApi>` rather than fetching it
+    /// from the thread-local again. Used by [`ReadRawVcFuture::new`] to share the `Arc` with
+    /// its inner `ResolveRawVcFuture` — avoids one `LocalKey::with` and one `Arc::clone`.
+    fn with_tt(vc: RawVc, tt: Arc<dyn TurboTasksApi>) -> Self {
         ResolveRawVcFuture {
             current: vc,
             read_output_options: ReadOutputOptions::default(),
             strongly_consistent: false,
             listener: None,
-            tt: None,
+            tt,
             cts: None,
         }
     }
@@ -376,8 +385,7 @@ impl Future for ResolveRawVcFuture {
         // SAFETY: we are not moving self
         let this = unsafe { self.get_unchecked_mut() };
 
-        // Cache `TURBO_TASKS` once per future to avoid a `LocalKey::with` on every poll.
-        let tt = this.tt.get_or_insert_with(|| with_turbo_tasks(Arc::clone));
+        let tt = &*this.tt;
 
         let poll_fn = || -> Poll<Self::Output> {
             'outer: loop {
@@ -444,7 +452,8 @@ impl Unpin for ResolveRawVcFuture {}
 
 #[must_use]
 pub struct ReadRawVcFuture {
-    /// Phase 1: resolves the [`RawVc`] pointer chain to a [`RawVc::TaskCell`].
+    /// Phase 1: resolves the [`RawVc`] pointer chain to a [`RawVc::TaskCell`]. Also owns the
+    /// `Arc<dyn TurboTasksApi>` that phase 2 reuses (see [`ResolveRawVcFuture::tt`]).
     resolve: ResolveRawVcFuture,
     /// Phase 2: options for the cell read once we have a [`RawVc::TaskCell`].
     read_cell_options: ReadCellOptions,
@@ -452,19 +461,18 @@ pub struct ReadRawVcFuture {
     resolved: Option<(TaskId, CellId)>,
     /// Phase 2: listener for the cell read wait.
     listener: Option<EventListener>,
-    /// Cached `Arc<dyn TurboTasksApi>` for phase 2 polls. See the equivalent field on
-    /// [`ResolveRawVcFuture`] for rationale.
-    tt: Option<Arc<dyn TurboTasksApi>>,
 }
 
 impl ReadRawVcFuture {
     pub(crate) fn new(vc: RawVc) -> Self {
+        // Capture `Arc<dyn TurboTasksApi>` once at construction; the inner
+        // `ResolveRawVcFuture` borrows it from `self.resolve.tt` for both phase 1 and
+        // phase 2 polls. One `LocalKey::with` for the lifetime of both phases.
         ReadRawVcFuture {
             resolve: ResolveRawVcFuture::new(vc),
             read_cell_options: ReadCellOptions::default(),
             resolved: None,
             listener: None,
-            tt: None,
         }
     }
 
@@ -526,8 +534,10 @@ impl Future for ReadRawVcFuture {
         // At this point `this.resolved` is `Some((task, index))`.
         let (task, index) = this.resolved.unwrap();
 
-        // Cache `TURBO_TASKS` once per future to avoid a `LocalKey::with` on every poll.
-        let tt = this.tt.get_or_insert_with(|| with_turbo_tasks(Arc::clone));
+        // Reuse the `Arc<dyn TurboTasksApi>` captured by `ResolveRawVcFuture` at
+        // construction. Phase 1 already used it; sharing avoids a second `LocalKey::with`
+        // and `Arc::clone`.
+        let tt = &*this.resolve.tt;
 
         let poll_fn = || -> Poll<Self::Output> {
             loop {

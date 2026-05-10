@@ -136,7 +136,7 @@ impl_borrow_decode!(CachedTaskType);
 /// `triomphe::Arc` saves one `usize` per allocation (no weak count) and avoids the weak-count
 /// CAS in `drop_slow` compared to `std::sync::Arc`. We never need `Weak<CachedTaskType>`, so
 /// the trade-off is favorable.
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct CachedTaskTypeArc(pub triomphe::Arc<CachedTaskType>);
 
 impl CachedTaskTypeArc {
@@ -159,15 +159,6 @@ impl std::borrow::Borrow<CachedTaskType> for CachedTaskTypeArc {
         &self.0
     }
 }
-
-impl PartialEq for CachedTaskTypeArc {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        triomphe::Arc::ptr_eq(&self.0, &other.0) || **self == **other
-    }
-}
-
-impl Eq for CachedTaskTypeArc {}
 
 impl Display for CachedTaskTypeArc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
