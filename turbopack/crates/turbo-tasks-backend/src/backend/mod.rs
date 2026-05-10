@@ -239,7 +239,15 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
                 TaskId::try_from(TRANSIENT_TASK_BIT).unwrap(),
                 TaskId::MAX,
             ),
-            task_cache: FxDashMap::default(),
+            // Match `storage.map`'s shard count instead of falling through to dashmap's
+            // default (`num_cpus * 4`). On a 14-core machine that default is 64 shards
+            // versus our heuristic's 4096; the cache lookup path was contending with
+            // itself on what should be cheap reads.
+            task_cache: FxDashMap::with_capacity_and_hasher_and_shard_amount(
+                0,
+                Default::default(),
+                shard_amount,
+            ),
             storage: Storage::new(shard_amount, small_preallocation),
             snapshot_coord: SnapshotCoordinator::new(),
             snapshot_in_progress: Mutex::new(()),
