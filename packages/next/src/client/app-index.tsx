@@ -23,6 +23,7 @@ import AppRouter from './components/app-router'
 import DefaultGlobalError from './components/builtin/global-error'
 import type { InitialRSCPayload } from '../shared/lib/app-router-types'
 import { createInitialRouterState } from './components/router-reducer/create-initial-router-state'
+import { processFetch } from './components/router-reducer/fetch-server-response'
 import { MissingSlotContext } from '../shared/lib/app-router-context.shared-runtime'
 import type { StaticIndicatorState } from './dev/hot-reloader/app/hot-reloader-app'
 import { createInitialRSCPayloadFromFallbackPrerender } from './flight-data-helpers'
@@ -190,11 +191,25 @@ if (process.env.__NEXT_USE_OFFLINE) {
   // Keep the offline event module out of disabled client bundles.
 }
 
+let outputExportFallbackBootstrap:
+  | typeof import('./output-export-fallback-bootstrap')
+  | null
+if (process.env.__NEXT_OUTPUT_EXPORT_DYNAMIC_FALLBACKS) {
+  outputExportFallbackBootstrap =
+    require('./output-export-fallback-bootstrap') as typeof import('./output-export-fallback-bootstrap')
+} else {
+  outputExportFallbackBootstrap = null
+}
+
+const outputExportFallbackState =
+  outputExportFallbackBootstrap?.getOutputExportFallbackState()
+
 const hasClientResumeShell = Boolean(window.__NEXT_CLIENT_RESUME)
 const hasLockedStaticShell =
   Boolean(instantTestStaticFetch) ||
   Boolean(offlineNavigationFallbackBootstrap) ||
-  hasClientResumeShell
+  hasClientResumeShell ||
+  Boolean(outputExportFallbackState?.isFallback)
 
 const encoder = new TextEncoder()
 
@@ -282,7 +297,9 @@ function nextServerDataRegisterWriter(ctr: ReadableStreamDefaultController) {
     if (initialServerDataLoaded && !initialServerDataFlushed) {
       // Locked static shells do not have a real inline Flight stream. Closing
       // or erroring this stream causes React to report a missing-data failure,
-      // but the actual hydration data arrives through a separate response.
+      // but the actual hydration data arrives through a separate response:
+      // the instant test fetch, client resume fetch, export fallback fetch, or
+      // offline router-cache reconstruction.
       if (isStreamErrorOrUnfinished(ctr)) {
         if (!hasLockedStaticShell) {
           ctr.error(
@@ -348,11 +365,16 @@ if (process.env.NODE_ENV !== 'production') {
 // truncate a clone at the static stage byte boundary and cache it. We don't
 // know if `l` is present until React decodes the payload, so always tee and
 // cancel the clone if not needed.
+//
+// Skip this for generated fallback documents. The inline `__next_f` stream
+// belongs to the fallback shell, not the actual route the user requested, so
+// seeding the cache from it can poison the initial route state.
 let initialFlightStreamForCache: ReadableStream<Uint8Array> | null = null
 if (
   process.env.__NEXT_CACHE_COMPONENTS &&
   process.env.__NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS &&
-  !offlineNavigationFallbackBootstrap
+  !offlineNavigationFallbackBootstrap &&
+  !outputExportFallbackState?.isFallback
 ) {
   const [forReact, forCache] = readable.tee()
   readable = forReact
@@ -376,11 +398,14 @@ if (
 
 let initialServerResponse: Promise<InitialRSCPayload>
 if (instantTestStaticFetch) {
+  const processedStaticFetch = Promise.resolve(instantTestStaticFetch)
+    .then(processFetch)
+    .then(({ response }) => response)
   // Instant Navigation Testing API: hydrate from the static RSC payload
   // fetch kicked off by an injected <script> tag, instead of the inline
   // Flight data (which is not present in the static shell).
   initialServerResponse = Promise.resolve(
-    createFromFetch<InitialRSCPayload>(instantTestStaticFetch, {
+    createFromFetch<InitialRSCPayload>(processedStaticFetch, {
       callServer,
       findSourceMapURL,
       debugChannel,
@@ -392,10 +417,22 @@ if (instantTestStaticFetch) {
     })
   ).then(async (initialRSCPayload) => {
     return createInitialRSCPayloadFromFallbackPrerender(
-      await instantTestStaticFetch,
+      await processedStaticFetch,
       initialRSCPayload
     )
   })
+} else if (
+  outputExportFallbackBootstrap &&
+  outputExportFallbackState?.isFallback
+) {
+  // This must be checked before __NEXT_CLIENT_RESUME because _fallback.html may
+  // be based on a PPR shell that also sets __NEXT_CLIENT_RESUME. Export fallback
+  // boot always fetches the RSC payload for the requested route.
+  initialServerResponse =
+    outputExportFallbackBootstrap.createOutputExportFallbackInitialResponse({
+      createFromFetch,
+      debugChannel,
+    })
 } else if (offlineNavigationFallbackBootstrap) {
   initialServerResponse = offlineNavigationFallbackBootstrap.then(
     async (bootstrap) => {
@@ -408,15 +445,19 @@ if (instantTestStaticFetch) {
   )
 } else if (window.__NEXT_CLIENT_RESUME) {
   const clientResumeFetch: Promise<Response> = window.__NEXT_CLIENT_RESUME
+  const processedClientResumeFetch = Promise.resolve(clientResumeFetch)
+    .then(processFetch)
+    .then(({ response }) => response)
   initialServerResponse = Promise.resolve(
-    createFromFetch<InitialRSCPayload>(clientResumeFetch, {
+    createFromFetch<InitialRSCPayload>(processedClientResumeFetch, {
       callServer,
       findSourceMapURL,
       debugChannel,
+      unstable_allowPartialStream: true,
     })
   ).then(async (fallbackInitialRSCPayload) =>
     createInitialRSCPayloadFromFallbackPrerender(
-      await clientResumeFetch,
+      await processedClientResumeFetch,
       fallbackInitialRSCPayload
     )
   )
@@ -577,11 +618,12 @@ export async function hydrate(
 
   if (
     document.documentElement.id === '__next_error__' ||
-    isOfflineNavigationFallbackDocument()
+    isOfflineNavigationFallbackDocument() ||
+    outputExportFallbackState?.isFallback
   ) {
     let element = reactEl
-    // Error documents and generated offline navigation fallback documents do
-    // not contain route HTML that can be hydrated.
+    // Error documents and generated fallback documents do not contain route
+    // HTML that can be hydrated.
     if (process.env.NODE_ENV !== 'production') {
       const { RootLevelDevOverlayElement } =
         require('../next-devtools/userspace/app/client-entry') as typeof import('../next-devtools/userspace/app/client-entry')
@@ -592,7 +634,20 @@ export async function hydrate(
       )
     }
 
-    ReactDOMClient.createRoot(appElement, reactRootOptions).render(element)
+    const root = ReactDOMClient.createRoot(appElement, reactRootOptions)
+    root.render(element)
+
+    // Remove the visibility:hidden style injected by _fallback.html to
+    // prevent flashing stale content. MutationObserver fires after React
+    // commits its first render (replaces #__next children).
+    if (
+      outputExportFallbackBootstrap &&
+      outputExportFallbackState?.isFallback
+    ) {
+      outputExportFallbackBootstrap.removeOutputExportFallbackStyleOnCommit(
+        appElement
+      )
+    }
   } else {
     React.startTransition(() => {
       ReactDOMClient.hydrateRoot(appElement, reactEl, {
