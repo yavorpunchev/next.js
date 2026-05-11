@@ -27,6 +27,7 @@ export interface InitialRouterStateParameters {
   initialRSCPayload: InitialRSCPayload
   initialFlightStreamForCache?: ReadableStream<Uint8Array> | null
   location: Location | null
+  outputExportFallbackBasePath?: string | null
 }
 
 export function createInitialRouterState({
@@ -34,6 +35,7 @@ export function createInitialRouterState({
   initialRSCPayload,
   initialFlightStreamForCache,
   location,
+  outputExportFallbackBasePath = null,
 }: InitialRouterStateParameters): AppRouterState {
   const {
     c: initialCanonicalUrlParts,
@@ -119,7 +121,8 @@ export function createInitialRouterState({
       initialCouldBeIntercepted,
       canonicalUrl,
       initialSupportsPerSegmentPrefetching,
-      false // hasDynamicRewrite
+      false, // hasDynamicRewrite
+      { outputExportFallbackBasePath }
     )
 
     // Write the initial seed data into the segment cache so subsequent
@@ -148,7 +151,8 @@ export function createInitialRouterState({
               staleAt,
               initialTree,
               initialRenderedSearch,
-              true // isResponsePartial
+              true, // isResponsePartial
+              outputExportFallbackBasePath
             )
           })
           .catch(() => {
@@ -173,7 +177,8 @@ export function createInitialRouterState({
               staleAt,
               initialTree,
               initialRenderedSearch,
-              false // isResponsePartial
+              false, // isResponsePartial
+              outputExportFallbackBasePath
             )
           })
           .catch(() => {
@@ -198,7 +203,8 @@ export function createInitialRouterState({
         Date.now(),
         initialRuntimePrefetchStream,
         initialTree,
-        initialRenderedSearch
+        initialRenderedSearch,
+        outputExportFallbackBasePath
       )
         .then((processed) => {
           if (processed !== null) {

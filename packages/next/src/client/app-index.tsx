@@ -397,6 +397,7 @@ if (
 }
 
 let initialServerResponse: Promise<InitialRSCPayload>
+let initialOutputExportFallbackBasePath: string | null = null
 if (instantTestStaticFetch) {
   const processedStaticFetch = Promise.resolve(instantTestStaticFetch)
     .then(processFetch)
@@ -428,10 +429,14 @@ if (instantTestStaticFetch) {
   // This must be checked before __NEXT_CLIENT_RESUME because _fallback.html may
   // be based on a PPR shell that also sets __NEXT_CLIENT_RESUME. Export fallback
   // boot always fetches the RSC payload for the requested route.
-  initialServerResponse =
-    outputExportFallbackBootstrap.createOutputExportFallbackInitialResponse({
+  initialServerResponse = outputExportFallbackBootstrap
+    .createOutputExportFallbackInitialResponse({
       createFromFetch,
       debugChannel,
+    })
+    .then(({ initialRSCPayload, fallbackBasePath }) => {
+      initialOutputExportFallbackBasePath = fallbackBasePath
+      return initialRSCPayload
     })
 } else if (offlineNavigationFallbackBootstrap) {
   initialServerResponse = offlineNavigationFallbackBootstrap.then(
@@ -597,6 +602,7 @@ export async function hydrate(
       initialRSCPayload,
       initialFlightStreamForCache,
       location: window.location,
+      outputExportFallbackBasePath: initialOutputExportFallbackBasePath,
     }),
     instrumentationHooks
   )

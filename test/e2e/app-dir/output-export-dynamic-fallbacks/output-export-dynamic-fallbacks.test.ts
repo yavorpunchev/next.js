@@ -15,7 +15,7 @@ describe('output-export-dynamic-fallbacks', () => {
     skipStart: true,
   })
 
-  it('writes fallback artifacts and resolves hard loads and prefetched soft navigations', async () => {
+  it('writes fallback artifacts and resolves hard loads and soft navigations', async () => {
     await next.build()
 
     const outDir = join(next.testDir, 'out')
@@ -56,7 +56,7 @@ describe('output-export-dynamic-fallbacks', () => {
       const hardLoad = await webdriver(port, '/another/alpha')
       try {
         await retry(async () => {
-          expect(await hardLoad.elementByCss('h1').text()).toBe('alpha')
+          expect(await hardLoad.elementByCss('#slug').text()).toBe('alpha')
         })
       } finally {
         await hardLoad.close()
@@ -75,11 +75,16 @@ describe('output-export-dynamic-fallbacks', () => {
 
         await act!(async () => {
           await toggle.click()
-          await softNav.elementByCss('a[href="/another/alpha"]').click()
         })
 
+        await act!(async () => {
+          await softNav.elementByCss('a[href="/another/alpha"]').click()
+        }, 'no-requests')
+
         await retry(async () => {
-          expect(await softNav.elementByCss('h1').text()).toBe('alpha')
+          expect(await softNav.eval('document.body.innerText')).toContain(
+            'alpha'
+          )
         })
       } finally {
         await softNav.close()
