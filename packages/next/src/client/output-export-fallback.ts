@@ -1,6 +1,25 @@
 import { getOutputExportFallbackPath } from '../lib/output-export-dynamic-fallback'
 import { RSC_CONTENT_TYPE_HEADER } from './components/app-router-headers'
 
+type OutputExportCachedResponse = {
+  body: ArrayBuffer
+  headers: Array<[string, string]>
+  status: number
+  statusText: string
+}
+
+type OutputExportFallbackCacheStore = {
+  dataResponses: Map<string, Promise<OutputExportCachedResponse | null>>
+  dataUrls: Map<string, string>
+  basePaths: Map<string, string>
+}
+
+const outputExportFallbackCacheStore: OutputExportFallbackCacheStore = {
+  dataResponses: new Map<string, Promise<OutputExportCachedResponse | null>>(),
+  dataUrls: new Map<string, string>(),
+  basePaths: new Map<string, string>(),
+}
+
 function getOutputExportCandidatePrefixes(pathname: string): string[] {
   const segments = pathname.split('/').filter(Boolean)
   const candidates: string[] = []
@@ -54,6 +73,93 @@ function getConfiguredOutputExportDataUrl(
   return addOutputExportDataSuffix(configuredUrl)
 }
 
+function getOutputExportDataCandidates(url: URL): URL[] {
+  const direct = addOutputExportDataSuffix(url)
+
+  if (url.pathname.endsWith('/')) {
+    return [direct]
+  }
+
+  const trailingSlashUrl = new URL(url)
+  trailingSlashUrl.pathname = `${trailingSlashUrl.pathname}/`
+  const trailingSlash = addOutputExportDataSuffix(trailingSlashUrl)
+
+  return [direct, trailingSlash]
+}
+
+function normalizeOutputExportRouteDirectory(pathname: string): string {
+  if (pathname === '/') {
+    return ''
+  }
+  return pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
+}
+
+function cacheOutputExportFallbackDataUrl(
+  renderedUrl: URL,
+  fallbackUrl: URL,
+  resolvedDataUrl: URL
+) {
+  const { dataUrls, basePaths } = outputExportFallbackCacheStore
+  for (const candidateUrl of getOutputExportDataCandidates(renderedUrl)) {
+    dataUrls.set(candidateUrl.href, resolvedDataUrl.href)
+  }
+  basePaths.set(
+    normalizeOutputExportRouteDirectory(renderedUrl.pathname),
+    normalizeOutputExportRouteDirectory(fallbackUrl.pathname)
+  )
+}
+
+export function getCachedOutputExportFallbackDataUrl(url: URL): URL | null {
+  const cached = outputExportFallbackCacheStore.dataUrls.get(url.href)
+  return cached !== undefined ? new URL(cached) : null
+}
+
+export function getCachedOutputExportFallbackBasePath(url: URL): string | null {
+  let routeDirectory: string
+  if (url.pathname.endsWith('/index.txt')) {
+    routeDirectory = normalizeOutputExportRouteDirectory(
+      url.pathname.slice(0, -10) || '/'
+    )
+  } else if (url.pathname.endsWith('.txt')) {
+    routeDirectory = normalizeOutputExportRouteDirectory(
+      url.pathname.slice(0, -4) || '/'
+    )
+  } else {
+    routeDirectory = normalizeOutputExportRouteDirectory(
+      url.pathname.slice(0, url.pathname.lastIndexOf('/')) || '/'
+    )
+  }
+
+  const fallbackBasePath =
+    outputExportFallbackCacheStore.basePaths.get(routeDirectory)
+  return fallbackBasePath !== undefined ? fallbackBasePath : null
+}
+
+export function getCachedOutputExportFallbackRequestUrl(url: URL): URL | null {
+  const cachedDataUrl = getCachedOutputExportFallbackDataUrl(url)
+  if (cachedDataUrl !== null) {
+    return cachedDataUrl
+  }
+
+  const filename = url.pathname.slice(url.pathname.lastIndexOf('/') + 1)
+  if (!filename.startsWith('__next.')) {
+    return null
+  }
+
+  const routeDirectory = normalizeOutputExportRouteDirectory(
+    url.pathname.slice(0, url.pathname.lastIndexOf('/')) || '/'
+  )
+  const fallbackBasePath =
+    outputExportFallbackCacheStore.basePaths.get(routeDirectory)
+  if (fallbackBasePath === undefined) {
+    return null
+  }
+
+  const nextUrl = new URL(url)
+  nextUrl.pathname = `${fallbackBasePath}/${filename}`
+  return nextUrl
+}
+
 async function fetchConfiguredOutputExportDataResult(
   renderedUrl: URL,
   prefersTrailingSlash: boolean,
@@ -64,13 +170,11 @@ async function fetchConfiguredOutputExportDataResult(
     prefersTrailingSlash
   )
 
-  const response = await fetch(configuredDataUrl, init)
-  const contentType = response.headers.get('content-type') || ''
-  if (
-    !response.ok ||
-    !response.body ||
-    !isOutputExportFlightContentType(contentType)
-  ) {
+  const response = await fetchOutputExportDataResponseByUrl(
+    configuredDataUrl,
+    init
+  )
+  if (response === null) {
     return null
   }
 
@@ -78,6 +182,52 @@ async function fetchConfiguredOutputExportDataResult(
     response,
     dataUrl: configuredDataUrl,
   }
+}
+
+async function fetchOutputExportDataResponseByUrl(
+  dataUrl: URL,
+  init?: RequestInit
+): Promise<Response | null> {
+  const cacheKey = dataUrl.href
+  const dataResponseCache = outputExportFallbackCacheStore.dataResponses
+
+  let cachedResponse = dataResponseCache.get(cacheKey)
+  if (cachedResponse === undefined) {
+    cachedResponse = fetch(dataUrl, init)
+      .then(async (response) => {
+        const contentType = response.headers.get('content-type') || ''
+        if (
+          !response.ok ||
+          !response.body ||
+          !isOutputExportFlightContentType(contentType)
+        ) {
+          return null
+        }
+
+        return {
+          body: await response.arrayBuffer(),
+          headers: Array.from(response.headers.entries()),
+          status: response.status,
+          statusText: response.statusText,
+        }
+      })
+      .catch((error) => {
+        dataResponseCache.delete(cacheKey)
+        throw error
+      })
+    dataResponseCache.set(cacheKey, cachedResponse)
+  }
+
+  const response = await cachedResponse
+  if (response === null) {
+    return null
+  }
+
+  return new Response(response.body.slice(0), {
+    headers: response.headers,
+    status: response.status,
+    statusText: response.statusText,
+  })
 }
 
 export async function fetchOutputExportFallbackResponse(
@@ -98,6 +248,11 @@ export async function fetchOutputExportFallbackResponse(
       init
     )
     if (result) {
+      cacheOutputExportFallbackDataUrl(
+        renderedUrl,
+        candidateUrl,
+        result.dataUrl
+      )
       return {
         response: result.response,
         renderedUrl,
